@@ -44,16 +44,22 @@ function resetAlert() {
 let isDragging = false
 let lastX = 0
 let lastY = 0
+let moveDistance = 0 // BUG-7 FIX: 累计移动距离
+const DRAG_THRESHOLD = 5 // 5px 内视为点击
 
 function onMouseDown(e: MouseEvent) {
   isDragging = false
+  moveDistance = 0
   lastX = e.screenX
   lastY = e.screenY
 
   const onMove = (me: MouseEvent) => {
-    isDragging = true
     const dx = me.screenX - lastX
     const dy = me.screenY - lastY
+    moveDistance += Math.abs(dx) + Math.abs(dy)
+    if (moveDistance > DRAG_THRESHOLD) {
+      isDragging = true
+    }
     lastX = me.screenX
     lastY = me.screenY
     window.petAPI?.dragWindow(dx, dy)
@@ -62,7 +68,6 @@ function onMouseDown(e: MouseEvent) {
   const onUp = () => {
     window.removeEventListener('mousemove', onMove)
     window.removeEventListener('mouseup', onUp)
-    // 如果没有拖拽，触发 click
     if (!isDragging) {
       emit('click')
       resetAlert()

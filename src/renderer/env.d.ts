@@ -19,6 +19,7 @@ interface PetAPI {
   onSwitchCharacter: (callback: (name: string) => void) => () => void
   onShowChat: (callback: () => void) => () => void
   onWindowMoved: (callback: (pos: { x: number; y: number }) => void) => () => void
+  newSession: () => void
   saveSession: (id: string, messages: any[]) => void
   loadSession: (id: string) => Promise<any>
   listSessions: () => Promise<any[]>

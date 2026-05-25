@@ -4,51 +4,29 @@ import { spawn, ChildProcess } from 'child_process'
 import fs from 'fs'
 import os from 'os'
 
-// ============ 路径工具 (跨平台) ============
-const isWin = process.platform === 'win32'
-const sep = path.sep
-
-function getBaseDir(): string {
-  // 开发模式：项目根目录；打包后：exe 所在目录
-  if (app.isPackaged) {
-    return path.dirname(process.execPath)
-  }
-  return path.join(__dirname, '..', '..')
-}
-
-function getIconPath(): string {
-  const base = getBaseDir()
-  // 优先用 .ico (Windows) / .png (Linux/macOS)
-  if (isWin) return path.join(base, 'resources', 'icon.ico')
-  return path.join(base, 'resources', 'icon.png')
-}
-
-function getTrayIconPath(): string {
-  const base = getBaseDir()
-  if (isWin) return path.join(base, 'resources', 'tray.ico')
-  return path.join(base, 'resources', 'tray.png')
-}
-
 // ============ Constants ============
+const isWin = process.platform === 'win32'
 const PET_WIDTH = 320
 const PET_HEIGHT = 420
 const SESSION_DIR = path.join(app.getPath('userData'), 'sessions')
 
-// Ensure session dir
 if (!fs.existsSync(SESSION_DIR)) {
   fs.mkdirSync(SESSION_DIR, { recursive: true })
 }
 
-// ============ 全局状态 ============
+// ============ Global State ============
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let claudeProcess: ChildProcess | null = null
 let isClaudeBusy = false
+let claudeDoneSent = false // BUG-8: 防止 claude-done 双发
 
-// ============ 窗口创建 ============
+// 当前会话 ID（用于 --continue 多轮上下文）
+let currentSessionId: string | null = null
+
+// ============ Window ============
 function createWindow(): void {
-  const primaryDisplay = screen.getPrimaryDisplay()
-  const { width: screenW, height: screenH } = primaryDisplay.workAreaSize
+  const { width: screenW, height: screenH } = screen.getPrimaryDisplay().workAreaSize
 
   mainWindow = new BrowserWindow({
     width: PET_WIDTH,
@@ -61,8 +39,6 @@ function createWindow(): void {
     alwaysOnTop: true,
     skipTaskbar: true,
     hasShadow: false,
-    // Windows 特有：透明窗口需要关闭 GPU 加速
-    ...(isWin ? { backgroundColor: '#00000000' } : {}),
     webPreferences: {
       preload: path.join(__dirname, '..', 'preload', 'index.js'),
       contextIsolation: true,
@@ -71,7 +47,6 @@ function createWindow(): void {
     },
   })
 
-  // 加载渲染器
   if (!app.isPackaged) {
     mainWindow.loadURL('http://localhost:5173')
   } else {
@@ -79,108 +54,54 @@ function createWindow(): void {
   }
 
   mainWindow.setIgnoreMouseEvents(false)
-
   mainWindow.on('move', () => {
     if (mainWindow) {
       const [x, y] = mainWindow.getPosition()
       mainWindow.webContents.send('window-moved', { x, y })
     }
   })
-
-  mainWindow.on('closed', () => {
-    mainWindow = null
-  })
+  mainWindow.on('closed', () => { mainWindow = null })
 }
 
-// ============ 系统托盘 ============
+// ============ Tray ============
 function createTray(): void {
-  let icon: Electron.NativeImage
-
-  // 尝试从文件加载图标，失败则生成一个
-  const trayIconPath = getTrayIconPath()
-  if (fs.existsSync(trayIconPath)) {
-    icon = nativeImage.createFromPath(trayIconPath)
-  } else {
-    // 生成一个简单的圆形图标
-    const size = 32
-    const buf = Buffer.alloc(size * size * 4)
-    for (let i = 0; i < size * size; i++) {
-      const x = (i % size) - size / 2
-      const y = Math.floor(i / size) - size / 2
-      const dist = Math.sqrt(x * x + y * y)
-      if (dist < size / 2 - 1) {
-        const gradient = Math.max(0, 1 - dist / (size / 2))
-        buf[i * 4] = Math.round(108 + gradient * 50)     // R
-        buf[i * 4 + 1] = Math.round(92 + gradient * 80)   // G
-        buf[i * 4 + 2] = Math.round(231 - gradient * 30)  // B
-        buf[i * 4 + 3] = 255                               // A
-      } else {
-        buf[i * 4 + 3] = 0
-      }
+  const size = 32
+  const buf = Buffer.alloc(size * size * 4)
+  for (let i = 0; i < size * size; i++) {
+    const px = (i % size) - size / 2
+    const py = Math.floor(i / size) - size / 2
+    const dist = Math.sqrt(px * px + py * py)
+    if (dist < size / 2 - 1) {
+      const g = Math.max(0, 1 - dist / (size / 2))
+      buf[i * 4] = Math.round(108 + g * 50)
+      buf[i * 4 + 1] = Math.round(92 + g * 80)
+      buf[i * 4 + 2] = Math.round(231 - g * 30)
+      buf[i * 4 + 3] = 255
     }
-    icon = nativeImage.createFromBuffer(buf, { width: size, height: size })
   }
-
+  const icon = nativeImage.createFromBuffer(buf, { width: size, height: size })
   tray = new Tray(icon.resize({ width: 16, height: 16 }))
 
   const contextMenu = Menu.buildFromTemplate([
-    {
-      label: '💬 打开对话',
-      click: () => {
-        mainWindow?.show()
-        mainWindow?.webContents.send('show-chat')
-      },
-    },
+    { label: '💬 打开对话', click: () => { mainWindow?.show(); mainWindow?.webContents.send('show-chat') } },
     { type: 'separator' },
-    {
-      label: '🤍 一二',
-      type: 'radio',
-      checked: true,
-      click: () => mainWindow?.webContents.send('switch-character', 'yier'),
-    },
-    {
-      label: '💗 布布',
-      type: 'radio',
-      click: () => mainWindow?.webContents.send('switch-character', 'bubu'),
-    },
+    { label: '🤍 一二', type: 'radio', checked: true, click: () => mainWindow?.webContents.send('switch-character', 'yier') },
+    { label: '💗 布布', type: 'radio', click: () => mainWindow?.webContents.send('switch-character', 'bubu') },
     { type: 'separator' },
-    {
-      label: '📌 置顶窗口',
-      type: 'checkbox',
-      checked: true,
-      click: (menuItem) => {
-        mainWindow?.setAlwaysOnTop(menuItem.checked)
-      },
-    },
-    {
-      label: '🔧 开发者工具',
-      click: () => mainWindow?.webContents.openDevTools({ mode: 'detach' }),
-    },
+    { label: '📌 置顶窗口', type: 'checkbox', checked: true, click: (mi) => { mainWindow?.setAlwaysOnTop(mi.checked) } },
+    { label: '🔧 开发者工具', click: () => mainWindow?.webContents.openDevTools({ mode: 'detach' }) },
     { type: 'separator' },
-    {
-      label: '❌ 退出',
-      click: () => {
-        app.quit()
-      },
-    },
+    { label: '❌ 退出', click: () => app.quit() },
   ])
 
   tray.setToolTip('PetCode Assistant')
   tray.setContextMenu(contextMenu)
-  tray.on('click', () => {
-    mainWindow?.show()
-    mainWindow?.focus()
-  })
+  tray.on('click', () => { mainWindow?.show(); mainWindow?.focus() })
 }
 
-// ============ Claude Code 接入 ============
-// 使用 `claude -p "message" --output-format stream-json` 模式
-// 每次用户消息启动一次 claude 子进程，流式读取 stdout
+// ============ Claude Code ============
 function findClaudeBinary(): string {
-  // 1) 环境变量
   if (process.env.CLAUDE_PATH) return process.env.CLAUDE_PATH
-
-  // 2) 常见安装路径
   const candidates = isWin
     ? [
         path.join(os.homedir(), '.npm-global', 'claude.cmd'),
@@ -193,15 +114,17 @@ function findClaudeBinary(): string {
         path.join(os.homedir(), '.local', 'bin', 'claude'),
         'claude',
       ]
-
   for (const c of candidates) {
-    try {
-      if (fs.existsSync(c)) return c
-    } catch {
-      // ignore
-    }
+    try { if (fs.existsSync(c)) return c } catch { /* skip */ }
   }
-  return 'claude' // fallback to PATH
+  return 'claude'
+}
+
+// BUG-2 FIX: 通过临时文件传递 prompt，避免 shell 转义和参数长度限制
+function writePromptFile(content: string): string {
+  const tmpFile = path.join(os.tmpdir(), `petcode-prompt-${Date.now()}.txt`)
+  fs.writeFileSync(tmpFile, content, 'utf-8')
+  return tmpFile
 }
 
 function sendToClaude(message: string, files?: string[]): void {
@@ -211,9 +134,10 @@ function sendToClaude(message: string, files?: string[]): void {
   }
 
   isClaudeBusy = true
+  claudeDoneSent = false
   mainWindow?.webContents.send('claude-thinking')
 
-  // 构建完整 prompt（含文件内容）
+  // 构建 prompt（含文件内容）
   let fullMessage = message
   if (files && files.length > 0) {
     const parts: string[] = []
@@ -241,16 +165,28 @@ function sendToClaude(message: string, files?: string[]): void {
   const claudeBin = findClaudeBinary()
   const cwd = os.homedir()
 
-  // 使用 -p 模式 + stream-json
-  const args = ['-p', fullMessage, '--output-format', 'stream-json']
+  // BUG-1 FIX: 使用 --continue 维护多轮上下文
+  // BUG-2 FIX: 通过临时文件传 prompt，用 cat pipe 给 stdin（避免 shell 转义问题）
+  const args = ['--output-format', 'stream-json', '--verbose']
+  if (currentSessionId) {
+    args.push('--resume', currentSessionId)
+  }
+
+  // 将 prompt 写入临时文件，通过 stdin 传入
+  const promptFile = writePromptFile(fullMessage)
 
   try {
     claudeProcess = spawn(claudeBin, args, {
       cwd,
       env: { ...process.env },
       stdio: ['pipe', 'pipe', 'pipe'],
-      shell: isWin, // Windows 需要 shell: true 才能找到 .cmd
+      // BUG-2 FIX: Linux/macOS 不需要 shell；Windows 用 shell 但 prompt 走 stdin 不走参数
+      shell: false,
     })
+
+    // 通过 stdin 写入 prompt 内容
+    claudeProcess.stdin?.write(fullMessage)
+    claudeProcess.stdin?.end()
 
     let buffer = ''
 
@@ -264,7 +200,32 @@ function sendToClaude(message: string, files?: string[]): void {
         if (!trimmed) continue
         try {
           const parsed = JSON.parse(trimmed)
-          mainWindow?.webContents.send('claude-stream', parsed)
+          // BUG-3 FIX: 解析 assistant 消息中的 text content blocks
+          if (parsed.type === 'assistant' && parsed.message?.content) {
+            for (const block of parsed.message.content) {
+              if (block.type === 'text' && block.text) {
+                mainWindow?.webContents.send('claude-stream', {
+                  type: 'content_block_delta',
+                  delta: { type: 'text_delta', text: block.text },
+                })
+              }
+            }
+          } else if (parsed.type === 'result') {
+            // 记录 session_id 用于下次 --resume
+            if (parsed.session_id) {
+              currentSessionId = parsed.session_id
+            }
+            // 也发送 result 作为最终内容
+            if (parsed.result) {
+              mainWindow?.webContents.send('claude-stream', {
+                type: 'result',
+                result: parsed.result,
+              })
+            }
+          } else {
+            // 转发其他消息（system init 等）
+            mainWindow?.webContents.send('claude-stream', parsed)
+          }
         } catch {
           mainWindow?.webContents.send('claude-stream', { type: 'raw', text: trimmed })
         }
@@ -276,32 +237,51 @@ function sendToClaude(message: string, files?: string[]): void {
       if (text) console.error('[claude stderr]', text)
     })
 
-    claudeProcess.on('close', (code) => {
-      // 处理剩余 buffer
+    claudeProcess.on('close', () => {
       if (buffer.trim()) {
         try {
           const parsed = JSON.parse(buffer.trim())
-          mainWindow?.webContents.send('claude-stream', parsed)
+          if (parsed.type === 'assistant' && parsed.message?.content) {
+            for (const block of parsed.message.content) {
+              if (block.type === 'text' && block.text) {
+                mainWindow?.webContents.send('claude-stream', {
+                  type: 'content_block_delta',
+                  delta: { type: 'text_delta', text: block.text },
+                })
+              }
+            }
+          } else if (parsed.type === 'result' && parsed.result) {
+            if (parsed.session_id) currentSessionId = parsed.session_id
+            mainWindow?.webContents.send('claude-stream', { type: 'result', result: parsed.result })
+          }
         } catch {
           mainWindow?.webContents.send('claude-stream', { type: 'raw', text: buffer.trim() })
         }
       }
-      claudeProcess = null
-      isClaudeBusy = false
-      mainWindow?.webContents.send('claude-done')
+      // BUG-8 FIX: 只发一次 claude-done
+      cleanupClaude()
     })
 
     claudeProcess.on('error', (err) => {
       console.error('Failed to start Claude:', err)
-      claudeProcess = null
-      isClaudeBusy = false
       mainWindow?.webContents.send('claude-error', `无法启动 Claude Code: ${err.message}\n请确认已安装: npm install -g @anthropic-ai/claude-code`)
-      mainWindow?.webContents.send('claude-done')
+      cleanupClaude()
     })
   } catch (err: any) {
-    claudeProcess = null
-    isClaudeBusy = false
     mainWindow?.webContents.send('claude-error', err.message)
+    cleanupClaude()
+  }
+
+  // 清理临时文件
+  try { fs.unlinkSync(promptFile) } catch { /* ignore */ }
+}
+
+// BUG-8 FIX: 统一清理，确保 claude-done 只发一次
+function cleanupClaude(): void {
+  claudeProcess = null
+  isClaudeBusy = false
+  if (!claudeDoneSent) {
+    claudeDoneSent = true
     mainWindow?.webContents.send('claude-done')
   }
 }
@@ -336,10 +316,13 @@ function setupIPC(): void {
   ipcMain.on('stop-claude', () => {
     if (claudeProcess) {
       claudeProcess.kill()
-      claudeProcess = null
-      isClaudeBusy = false
-      mainWindow?.webContents.send('claude-done')
+      cleanupClaude()
     }
+  })
+
+  ipcMain.on('new-session', () => {
+    // 重置会话，下次调用 claude 不带 --resume
+    currentSessionId = null
   })
 
   ipcMain.on('window-drag', (_, data: { deltaX: number; deltaY: number }) => {
@@ -404,8 +387,7 @@ function setupIPC(): void {
   })
 }
 
-// ============ 生命周期 ============
-// Windows: 透明窗口需要关闭 GPU 加速（否则透明失效）
+// ============ Lifecycle ============
 if (isWin) {
   app.disableHardwareAcceleration()
 }
@@ -417,15 +399,11 @@ app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit()
-  }
+  if (process.platform !== 'darwin') app.quit()
 })
 
 app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) {
-    createWindow()
-  }
+  if (BrowserWindow.getAllWindows().length === 0) createWindow()
 })
 
 app.on('before-quit', () => {

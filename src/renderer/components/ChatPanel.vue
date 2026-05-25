@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, nextTick } from 'vue'
 
 const props = defineProps<{
   character: 'yier' | 'bubu'
@@ -21,9 +21,7 @@ const messages = ref<Message[]>([])
 const inputText = ref('')
 const isThinking = ref(false)
 const chatBody = ref<HTMLElement | null>(null)
-
-// 收集器：用于收集 claude stream-json 输出
-let streamContent = ''
+const streamContent = ref('') // BUG-4 FIX: 改为 ref，模板可响应
 let currentStreamMsgId = ''
 
 function scrollToBottom() {
@@ -57,6 +55,16 @@ function onKeydown(e: KeyboardEvent) {
   }
 }
 
+function newSession() {
+  messages.value = []
+  streamContent.value = ''
+  currentStreamMsgId = ''
+  // 通知主进程重置会话 ID
+  if (window.petAPI) {
+    ;(window.petAPI as any).newSession?.()
+  }
+}
+
 // 简易 markdown → HTML
 function renderMd(text: string): string {
   if (!text) return ''
@@ -76,7 +84,7 @@ function renderMd(text: string): string {
     .replace(/\n/g, '<br>')
 }
 
-// 事件清理函数数组
+// 事件清理
 const cleanups: (() => void)[] = []
 
 onMounted(() => {
@@ -85,7 +93,7 @@ onMounted(() => {
   cleanups.push(
     window.petAPI.onClaudeThinking(() => {
       isThinking.value = true
-      streamContent = ''
+      streamContent.value = ''
       currentStreamMsgId = `ai-${Date.now()}`
       messages.value.push({
         id: currentStreamMsgId,
@@ -99,19 +107,25 @@ onMounted(() => {
 
   cleanups.push(
     window.petAPI.onClaudeStream((data: any) => {
-      // Claude stream-json 输出格式
+      // BUG-3 FIX: 正确解析 CLI stream-json 格式
       if (data.type === 'content_block_delta') {
         const text = data.delta?.text || ''
-        streamContent += text
-        updateStreamMessage(streamContent)
+        streamContent.value += text
+        updateStreamMessage(streamContent.value)
+        // BUG-5 FIX: 收到内容时切换到 talking 状态
+        if (window.petAPI) {
+          // 通过自定义事件通知 App.vue
+          window.dispatchEvent(new CustomEvent('pet-state-change', { detail: 'talking' }))
+        }
       } else if (data.type === 'result') {
-        // 最终结果消息
         if (data.result) {
+          // 最终结果覆盖（确保完整）
           updateStreamMessage(data.result)
+          streamContent.value = data.result
         }
       } else if (data.type === 'raw') {
-        streamContent += data.text
-        updateStreamMessage(streamContent)
+        streamContent.value += data.text
+        updateStreamMessage(streamContent.value)
       }
     })
   )
@@ -119,8 +133,11 @@ onMounted(() => {
   cleanups.push(
     window.petAPI.onClaudeDone(() => {
       isThinking.value = false
+      window.dispatchEvent(new CustomEvent('pet-state-change', { detail: 'idle' }))
       // 保存会话
-      window.petAPI?.saveSession(`session-${Date.now()}`, messages.value)
+      if (messages.value.length > 0) {
+        window.petAPI?.saveSession(`session-${Date.now()}`, messages.value)
+      }
       scrollToBottom()
     })
   )
@@ -128,6 +145,7 @@ onMounted(() => {
   cleanups.push(
     window.petAPI.onClaudeError((msg: string) => {
       isThinking.value = false
+      window.dispatchEvent(new CustomEvent('pet-state-change', { detail: 'idle' }))
       messages.value.push({
         id: `err-${Date.now()}`,
         role: 'system',
@@ -150,24 +168,35 @@ function updateStreamMessage(content: string) {
   }
   scrollToBottom()
 }
+
+// BUG-5 FIX: 停止时也要重置状态
+function onStop() {
+  window.petAPI?.stopClaude()
+  window.dispatchEvent(new CustomEvent('pet-state-change', { detail: 'idle' }))
+}
 </script>
 
 <template>
   <div class="chat-panel" :class="`theme-${character}`">
-    <!-- Header -->
     <div class="chat-header">
       <div class="header-left">
         <span class="dot" :class="character"></span>
         <span class="title">{{ character === 'yier' ? '一二' : '布布' }} · AI 助手</span>
       </div>
-      <button class="close-btn" @click="emit('close')" title="关闭">
-        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-          <path d="M1 1l12 12M13 1L1 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-        </svg>
-      </button>
+      <div class="header-right">
+        <button class="icon-btn" @click="newSession" title="新会话">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <path d="M7 1v12M1 7h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+        </button>
+        <button class="icon-btn" @click="emit('close')" title="关闭">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <path d="M1 1l12 12M13 1L1 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </div>
     </div>
 
-    <!-- Messages -->
     <div class="chat-body" ref="chatBody">
       <div v-if="messages.length === 0" class="empty-state">
         <div class="empty-icon">{{ character === 'yier' ? '🤍' : '💗' }}</div>
@@ -184,12 +213,12 @@ function updateStreamMessage(content: string) {
         <div v-else class="msg-system">{{ msg.content }}</div>
       </div>
 
+      <!-- BUG-4 FIX: streamContent 现在是 ref，响应式正确 -->
       <div v-if="isThinking && !streamContent" class="thinking-dots">
         <span></span><span></span><span></span>
       </div>
     </div>
 
-    <!-- Input -->
     <div class="chat-input">
       <textarea
         v-model="inputText"
@@ -199,7 +228,7 @@ function updateStreamMessage(content: string) {
         :disabled="isThinking"
       ></textarea>
       <div class="input-actions">
-        <button v-if="isThinking" class="btn stop-btn" @click="window.petAPI?.stopClaude()">停止</button>
+        <button v-if="isThinking" class="btn stop-btn" @click="onStop">停止</button>
         <button v-else class="btn send-btn" :disabled="!inputText.trim()" @click="sendMessage">发送</button>
       </div>
     </div>
@@ -225,7 +254,6 @@ function updateStreamMessage(content: string) {
   transform: translateX(-50%);
 }
 
-/* --- Header --- */
 .chat-header {
   display: flex;
   align-items: center;
@@ -236,218 +264,89 @@ function updateStreamMessage(content: string) {
   flex-shrink: 0;
 }
 
-.header-left {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
+.header-left { display: flex; align-items: center; gap: 8px; }
+.header-right { display: flex; align-items: center; gap: 4px; }
 
-.dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-}
+.dot { width: 8px; height: 8px; border-radius: 50%; }
 .dot.yier { background: #DDD; }
 .dot.bubu { background: #FF6B9D; }
 
-.title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--pet-text);
-}
+.title { font-size: 13px; font-weight: 600; color: var(--pet-text); }
 
-.close-btn {
-  background: none;
-  border: none;
-  cursor: pointer;
-  padding: 4px;
-  border-radius: 6px;
-  color: var(--pet-text-light);
-  transition: all 0.15s;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+.icon-btn {
+  background: none; border: none; cursor: pointer; padding: 4px;
+  border-radius: 6px; color: var(--pet-text-light); transition: all 0.15s;
+  display: flex; align-items: center; justify-content: center;
 }
-.close-btn:hover {
-  background: rgba(0,0,0,0.06);
-  color: var(--pet-text);
-}
+.icon-btn:hover { background: rgba(0,0,0,0.06); color: var(--pet-text); }
 
-/* --- Body --- */
 .chat-body {
-  flex: 1;
-  overflow-y: auto;
-  padding: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
+  flex: 1; overflow-y: auto; padding: 12px;
+  display: flex; flex-direction: column; gap: 10px;
 }
 
-/* Empty state */
 .empty-state {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  height: 100%;
-  text-align: center;
-  gap: 8px;
+  display: flex; flex-direction: column; align-items: center;
+  justify-content: center; height: 100%; text-align: center; gap: 8px;
 }
-.empty-icon {
-  font-size: 32px;
-  animation: bounce-gentle 2s ease-in-out infinite;
-}
-.empty-text {
-  font-size: 14px;
-  color: var(--pet-text);
-  line-height: 1.6;
-}
-.empty-hint {
-  font-size: 11px;
-  color: var(--pet-text-light);
-  margin-top: 8px;
-}
+.empty-icon { font-size: 32px; animation: bounce-gentle 2s ease-in-out infinite; }
+.empty-text { font-size: 14px; color: var(--pet-text); line-height: 1.6; }
+.empty-hint { font-size: 11px; color: var(--pet-text-light); margin-top: 8px; }
 
-@keyframes bounce-gentle {
-  0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(-6px); }
-}
+@keyframes bounce-gentle { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-6px)} }
 
-/* --- Messages --- */
-.message {
-  max-width: 88%;
-  animation: msg-in 0.25s ease-out;
-}
+.message { max-width: 88%; animation: msg-in 0.25s ease-out; }
 .msg-user { align-self: flex-end; }
 
-.bubble {
-  padding: 8px 12px;
-  border-radius: 14px;
-  font-size: 13px;
-  line-height: 1.55;
-  word-break: break-word;
-}
-
-.user-bubble {
-  background: var(--pet-accent);
-  color: white;
-  border-bottom-right-radius: 4px;
-}
-
+.bubble { padding: 8px 12px; border-radius: 14px; font-size: 13px; line-height: 1.55; word-break: break-word; }
+.user-bubble { background: var(--pet-accent); color: white; border-bottom-right-radius: 4px; }
 .ai-bubble {
-  background: rgba(255,255,255,0.85);
-  color: var(--pet-text);
-  border-bottom-left-radius: 4px;
-  border: 1px solid rgba(0,0,0,0.05);
+  background: rgba(255,255,255,0.85); color: var(--pet-text);
+  border-bottom-left-radius: 4px; border: 1px solid rgba(0,0,0,0.05);
 }
 
 .ai-bubble :deep(pre.code-block) {
-  background: #1e1e2e;
-  color: #cdd6f4;
-  padding: 8px 10px;
-  border-radius: 8px;
-  overflow-x: auto;
-  font-size: 12px;
-  margin: 6px 0;
+  background: #1e1e2e; color: #cdd6f4; padding: 8px 10px;
+  border-radius: 8px; overflow-x: auto; font-size: 12px; margin: 6px 0;
   font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
 }
-
 .ai-bubble :deep(code.inline-code) {
-  background: rgba(0,0,0,0.06);
-  padding: 1px 5px;
-  border-radius: 4px;
-  font-size: 12px;
-  font-family: 'JetBrains Mono', monospace;
+  background: rgba(0,0,0,0.06); padding: 1px 5px;
+  border-radius: 4px; font-size: 12px; font-family: 'JetBrains Mono', monospace;
 }
 
-.msg-system {
-  text-align: center;
-  font-size: 12px;
-  color: var(--pet-text-light);
-  padding: 4px 8px;
-}
+.msg-system { text-align: center; font-size: 12px; color: var(--pet-text-light); padding: 4px 8px; }
 
-@keyframes msg-in {
-  from { opacity: 0; transform: translateY(6px); }
-  to { opacity: 1; transform: translateY(0); }
-}
+@keyframes msg-in { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
 
-/* --- Thinking --- */
-.thinking-dots {
-  display: flex;
-  gap: 4px;
-  padding: 8px 12px;
-  align-self: flex-start;
-}
+.thinking-dots { display: flex; gap: 4px; padding: 8px 12px; align-self: flex-start; }
 .thinking-dots span {
-  width: 6px;
-  height: 6px;
-  background: var(--pet-accent-light);
-  border-radius: 50%;
-  animation: dot-pulse 1.4s ease-in-out infinite;
+  width: 6px; height: 6px; background: var(--pet-accent-light);
+  border-radius: 50%; animation: dot-pulse 1.4s ease-in-out infinite;
 }
 .thinking-dots span:nth-child(2) { animation-delay: 0.2s; }
 .thinking-dots span:nth-child(3) { animation-delay: 0.4s; }
 
-@keyframes dot-pulse {
-  0%, 80%, 100% { transform: scale(0.6); opacity: 0.3; }
-  40% { transform: scale(1); opacity: 1; }
-}
+@keyframes dot-pulse { 0%,80%,100%{transform:scale(0.6);opacity:0.3} 40%{transform:scale(1);opacity:1} }
 
-/* --- Input --- */
 .chat-input {
-  padding: 10px 12px;
-  border-top: 1px solid rgba(255,255,255,0.2);
-  background: rgba(255,255,255,0.25);
-  flex-shrink: 0;
+  padding: 10px 12px; border-top: 1px solid rgba(255,255,255,0.2);
+  background: rgba(255,255,255,0.25); flex-shrink: 0;
 }
-
 .chat-input textarea {
-  width: 100%;
-  border: 1px solid rgba(0,0,0,0.08);
-  border-radius: 10px;
-  padding: 8px 10px;
-  font-size: 13px;
-  font-family: inherit;
-  resize: none;
-  background: rgba(255,255,255,0.6);
-  color: var(--pet-text);
-  outline: none;
+  width: 100%; border: 1px solid rgba(0,0,0,0.08); border-radius: 10px;
+  padding: 8px 10px; font-size: 13px; font-family: inherit; resize: none;
+  background: rgba(255,255,255,0.6); color: var(--pet-text); outline: none;
   transition: border-color 0.2s;
 }
-.chat-input textarea:focus {
-  border-color: var(--pet-accent);
-}
-.chat-input textarea::placeholder {
-  color: var(--pet-text-light);
-}
+.chat-input textarea:focus { border-color: var(--pet-accent); }
+.chat-input textarea::placeholder { color: var(--pet-text-light); }
+.input-actions { display: flex; justify-content: flex-end; margin-top: 6px; }
 
-.input-actions {
-  display: flex;
-  justify-content: flex-end;
-  margin-top: 6px;
-}
-
-.btn {
-  border: none;
-  padding: 5px 16px;
-  border-radius: 8px;
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.15s;
-}
-
-.send-btn {
-  background: var(--pet-accent);
-  color: white;
-}
+.btn { border: none; padding: 5px 16px; border-radius: 8px; font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.15s; }
+.send-btn { background: var(--pet-accent); color: white; }
 .send-btn:hover { background: #5B4BD5; }
 .send-btn:disabled { opacity: 0.4; cursor: default; }
-
-.stop-btn {
-  background: #FF6B6B;
-  color: white;
-}
+.stop-btn { background: #FF6B6B; color: white; }
 .stop-btn:hover { background: #E05555; }
 </style>

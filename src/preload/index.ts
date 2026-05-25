@@ -56,6 +56,7 @@ const petAPI = {
   },
 
   // === 会话管理 ===
+  newSession: () => ipcRenderer.send('new-session'),
   saveSession: (id: string, messages: any[]) => {
     ipcRenderer.send('save-session', { id, messages })
   },
