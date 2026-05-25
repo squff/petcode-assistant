@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain, Tray, Menu, screen, nativeImage } from 'electron'
 import path from 'path'
-import { spawn, ChildProcess } from 'child_process'
+import { spawn, ChildProcess, execSync } from 'child_process'
 import fs from 'fs'
 import os from 'os'
 
@@ -9,6 +9,7 @@ const isWin = process.platform === 'win32'
 const PET_WIDTH = 320
 const PET_HEIGHT = 420
 const SESSION_DIR = path.join(app.getPath('userData'), 'sessions')
+const WIN_ARG_LIMIT = 7500
 
 if (!fs.existsSync(SESSION_DIR)) {
   fs.mkdirSync(SESSION_DIR, { recursive: true })
@@ -19,9 +20,7 @@ let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let claudeProcess: ChildProcess | null = null
 let isClaudeBusy = false
-let claudeDoneSent = false // BUG-8: 防止 claude-done 双发
-
-// 当前会话 ID（用于 --continue 多轮上下文）
+let claudeDoneSent = false
 let currentSessionId: string | null = null
 
 // ============ Window ============
@@ -39,6 +38,7 @@ function createWindow(): void {
     alwaysOnTop: true,
     skipTaskbar: true,
     hasShadow: false,
+    ...(isWin ? { backgroundColor: '#00000000' } : {}),
     webPreferences: {
       preload: path.join(__dirname, '..', 'preload', 'index.js'),
       contextIsolation: true,
@@ -102,27 +102,41 @@ function createTray(): void {
 // ============ Claude Code ============
 function findClaudeBinary(): string {
   if (process.env.CLAUDE_PATH) return process.env.CLAUDE_PATH
-  const candidates = isWin
-    ? [
-        path.join(os.homedir(), '.npm-global', 'claude.cmd'),
-        path.join(os.homedir(), 'AppData', 'Roaming', 'npm', 'claude.cmd'),
-        'claude.cmd',
-      ]
-    : [
-        '/usr/local/bin/claude',
-        path.join(os.homedir(), '.npm-global', 'bin', 'claude'),
-        path.join(os.homedir(), '.local', 'bin', 'claude'),
-        'claude',
-      ]
-  for (const c of candidates) {
-    try { if (fs.existsSync(c)) return c } catch { /* skip */ }
+
+  if (isWin) {
+    const candidates = [
+      path.join(os.homedir(), '.npm-global', 'claude.cmd'),
+      path.join(os.homedir(), 'AppData', 'Roaming', 'npm', 'claude.cmd'),
+      path.join(os.homedir(), '.npm-global', 'claude.exe'),
+      path.join(os.homedir(), 'AppData', 'Roaming', 'npm', 'claude.exe'),
+    ]
+    for (const c of candidates) {
+      try { if (fs.existsSync(c)) return c } catch { /* skip */ }
+    }
+    try {
+      const result = execSync('where claude', { encoding: 'utf-8', timeout: 5000 }).trim().replace(/\r/g, '')
+      if (result) return result.split('\n')[0].trim()
+    } catch { /* not found */ }
+    return 'claude.cmd'
+  } else {
+    const candidates = [
+      '/usr/local/bin/claude',
+      path.join(os.homedir(), '.npm-global', 'bin', 'claude'),
+      path.join(os.homedir(), '.local', 'bin', 'claude'),
+    ]
+    for (const c of candidates) {
+      try { if (fs.existsSync(c)) return c } catch { /* skip */ }
+    }
+    try {
+      const result = execSync('which claude', { encoding: 'utf-8', timeout: 5000 }).trim()
+      if (result) return result
+    } catch { /* not found */ }
+    return 'claude'
   }
-  return 'claude'
 }
 
-// BUG-2 FIX: 通过临时文件传递 prompt，避免 shell 转义和参数长度限制
 function writePromptFile(content: string): string {
-  const tmpFile = path.join(os.tmpdir(), `petcode-prompt-${Date.now()}.txt`)
+  const tmpFile = path.join(os.tmpdir(), `petcode-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`)
   fs.writeFileSync(tmpFile, content, 'utf-8')
   return tmpFile
 }
@@ -165,28 +179,46 @@ function sendToClaude(message: string, files?: string[]): void {
   const claudeBin = findClaudeBinary()
   const cwd = os.homedir()
 
-  // BUG-1 FIX: 使用 --continue 维护多轮上下文
-  // BUG-2 FIX: 通过临时文件传 prompt，用 cat pipe 给 stdin（避免 shell 转义问题）
-  const args = ['--output-format', 'stream-json', '--verbose']
+  // 多轮上下文
+  const baseArgs = ['--output-format', 'stream-json', '--verbose']
   if (currentSessionId) {
-    args.push('--resume', currentSessionId)
+    baseArgs.push('--resume', currentSessionId)
   }
 
-  // 将 prompt 写入临时文件，通过 stdin 传入
-  const promptFile = writePromptFile(fullMessage)
+  // ---- 选择 spawn 策略 ----
+  let promptFile: string | null = null
+  let spawnCmd: string
+  let spawnArgs: string[]
+  let spawnShell: boolean
+
+  if (isWin) {
+    // Windows: .cmd 需要 shell:true
+    if (fullMessage.length < WIN_ARG_LIMIT) {
+      spawnCmd = claudeBin
+      spawnArgs = ['-p', fullMessage, ...baseArgs]
+      spawnShell = true
+    } else {
+      // 长 prompt：写临时文件，用 PowerShell 读取内容传给 claude
+      promptFile = writePromptFile(fullMessage)
+      const psScript = `$content = Get-Content -Raw -Path '${promptFile}'; & '${claudeBin}' -p $content ${baseArgs.map(a => `'${a}'`).join(' ')}`
+      spawnCmd = 'powershell'
+      spawnArgs = ['-NoProfile', '-NonInteractive', '-Command', psScript]
+      spawnShell = false
+    }
+  } else {
+    // Linux/Mac: prompt 直接当参数（Linux ARG_MAX 通常 2MB，足够）
+    spawnCmd = claudeBin
+    spawnArgs = ['-p', fullMessage, ...baseArgs]
+    spawnShell = false
+  }
 
   try {
-    claudeProcess = spawn(claudeBin, args, {
+    claudeProcess = spawn(spawnCmd, spawnArgs, {
       cwd,
       env: { ...process.env },
       stdio: ['pipe', 'pipe', 'pipe'],
-      // BUG-2 FIX: Linux/macOS 不需要 shell；Windows 用 shell 但 prompt 走 stdin 不走参数
-      shell: false,
+      shell: spawnShell,
     })
-
-    // 通过 stdin 写入 prompt 内容
-    claudeProcess.stdin?.write(fullMessage)
-    claudeProcess.stdin?.end()
 
     let buffer = ''
 
@@ -200,7 +232,6 @@ function sendToClaude(message: string, files?: string[]): void {
         if (!trimmed) continue
         try {
           const parsed = JSON.parse(trimmed)
-          // BUG-3 FIX: 解析 assistant 消息中的 text content blocks
           if (parsed.type === 'assistant' && parsed.message?.content) {
             for (const block of parsed.message.content) {
               if (block.type === 'text' && block.text) {
@@ -211,19 +242,11 @@ function sendToClaude(message: string, files?: string[]): void {
               }
             }
           } else if (parsed.type === 'result') {
-            // 记录 session_id 用于下次 --resume
-            if (parsed.session_id) {
-              currentSessionId = parsed.session_id
-            }
-            // 也发送 result 作为最终内容
+            if (parsed.session_id) currentSessionId = parsed.session_id
             if (parsed.result) {
-              mainWindow?.webContents.send('claude-stream', {
-                type: 'result',
-                result: parsed.result,
-              })
+              mainWindow?.webContents.send('claude-stream', { type: 'result', result: parsed.result })
             }
           } else {
-            // 转发其他消息（system init 等）
             mainWindow?.webContents.send('claude-stream', parsed)
           }
         } catch {
@@ -258,7 +281,6 @@ function sendToClaude(message: string, files?: string[]): void {
           mainWindow?.webContents.send('claude-stream', { type: 'raw', text: buffer.trim() })
         }
       }
-      // BUG-8 FIX: 只发一次 claude-done
       cleanupClaude()
     })
 
@@ -272,11 +294,12 @@ function sendToClaude(message: string, files?: string[]): void {
     cleanupClaude()
   }
 
-  // 清理临时文件
-  try { fs.unlinkSync(promptFile) } catch { /* ignore */ }
+  // 延迟清理临时文件
+  if (promptFile) {
+    setTimeout(() => { try { fs.unlinkSync(promptFile!) } catch { /* ignore */ } }, 15000)
+  }
 }
 
-// BUG-8 FIX: 统一清理，确保 claude-done 只发一次
 function cleanupClaude(): void {
   claudeProcess = null
   isClaudeBusy = false
@@ -320,10 +343,7 @@ function setupIPC(): void {
     }
   })
 
-  ipcMain.on('new-session', () => {
-    // 重置会话，下次调用 claude 不带 --resume
-    currentSessionId = null
-  })
+  ipcMain.on('new-session', () => { currentSessionId = null })
 
   ipcMain.on('window-drag', (_, data: { deltaX: number; deltaY: number }) => {
     if (mainWindow) {
@@ -336,9 +356,7 @@ function setupIPC(): void {
     mainWindow?.setIgnoreMouseEvents(enabled, { forward: true })
   })
 
-  ipcMain.on('minimize-to-tray', () => {
-    mainWindow?.hide()
-  })
+  ipcMain.on('minimize-to-tray', () => { mainWindow?.hide() })
 
   ipcMain.on('save-session', (_, data: { id: string; messages: any[] }) => {
     const filePath = path.join(SESSION_DIR, `${data.id}.json`)
@@ -347,9 +365,7 @@ function setupIPC(): void {
 
   ipcMain.handle('load-session', (_, sessionId: string) => {
     const filePath = path.join(SESSION_DIR, `${sessionId}.json`)
-    if (fs.existsSync(filePath)) {
-      return JSON.parse(fs.readFileSync(filePath, 'utf-8'))
-    }
+    if (fs.existsSync(filePath)) return JSON.parse(fs.readFileSync(filePath, 'utf-8'))
     return null
   })
 
@@ -360,37 +376,23 @@ function setupIPC(): void {
         try {
           const data = JSON.parse(fs.readFileSync(path.join(SESSION_DIR, f), 'utf-8'))
           return { id: data.id, preview: data.messages?.[0]?.content?.slice(0, 50) || '' }
-        } catch {
-          return { id: f.replace('.json', ''), preview: '(读取失败)' }
-        }
+        } catch { return { id: f.replace('.json', ''), preview: '(读取失败)' } }
       })
-    } catch {
-      return []
-    }
+    } catch { return [] }
   })
 
   ipcMain.handle('get-file-info', async (_, filePaths: string[]) => {
     return filePaths.map((fp) => {
       try {
         const stat = fs.statSync(fp)
-        return {
-          path: fp,
-          name: path.basename(fp),
-          isDirectory: stat.isDirectory(),
-          size: stat.size,
-          ext: path.extname(fp).slice(1).toLowerCase(),
-        }
-      } catch {
-        return { path: fp, name: path.basename(fp), error: true }
-      }
+        return { path: fp, name: path.basename(fp), isDirectory: stat.isDirectory(), size: stat.size, ext: path.extname(fp).slice(1).toLowerCase() }
+      } catch { return { path: fp, name: path.basename(fp), error: true } }
     })
   })
 }
 
 // ============ Lifecycle ============
-if (isWin) {
-  app.disableHardwareAcceleration()
-}
+if (isWin) app.disableHardwareAcceleration()
 
 app.whenReady().then(() => {
   createWindow()
@@ -398,17 +400,6 @@ app.whenReady().then(() => {
   setupIPC()
 })
 
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit()
-})
-
-app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) createWindow()
-})
-
-app.on('before-quit', () => {
-  if (claudeProcess) {
-    claudeProcess.kill()
-    claudeProcess = null
-  }
-})
+app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit() })
+app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow() })
+app.on('before-quit', () => { if (claudeProcess) { claudeProcess.kill(); claudeProcess = null } })

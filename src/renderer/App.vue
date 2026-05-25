@@ -64,7 +64,6 @@ onUnmounted(() => {
       <ChatPanel
         v-if="showChat"
         :character="currentCharacter"
-        :pet-state="petState"
         @close="showChat = false"
       />
     </Transition>

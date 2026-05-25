@@ -1,9 +1,8 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, onMounted, onUnmounted, nextTick } from 'vue'
 
 const props = defineProps<{
   character: 'yier' | 'bubu'
-  petState: string
 }>()
 
 const emit = defineEmits<{
@@ -21,8 +20,9 @@ const messages = ref<Message[]>([])
 const inputText = ref('')
 const isThinking = ref(false)
 const chatBody = ref<HTMLElement | null>(null)
-const streamContent = ref('') // BUG-4 FIX: 改为 ref，模板可响应
+const streamContent = ref('')
 let currentStreamMsgId = ''
+let talkingDispatched = false // 防止 talking 状态重复派发
 
 function scrollToBottom() {
   nextTick(() => {
@@ -59,9 +59,9 @@ function newSession() {
   messages.value = []
   streamContent.value = ''
   currentStreamMsgId = ''
-  // 通知主进程重置会话 ID
+  talkingDispatched = false
   if (window.petAPI) {
-    ;(window.petAPI as any).newSession?.()
+    (window.petAPI as any).newSession?.()
   }
 }
 
@@ -94,6 +94,7 @@ onMounted(() => {
     window.petAPI.onClaudeThinking(() => {
       isThinking.value = true
       streamContent.value = ''
+      talkingDispatched = false
       currentStreamMsgId = `ai-${Date.now()}`
       messages.value.push({
         id: currentStreamMsgId,
@@ -107,19 +108,17 @@ onMounted(() => {
 
   cleanups.push(
     window.petAPI.onClaudeStream((data: any) => {
-      // BUG-3 FIX: 正确解析 CLI stream-json 格式
       if (data.type === 'content_block_delta') {
         const text = data.delta?.text || ''
         streamContent.value += text
         updateStreamMessage(streamContent.value)
-        // BUG-5 FIX: 收到内容时切换到 talking 状态
-        if (window.petAPI) {
-          // 通过自定义事件通知 App.vue
+        // 只在第一次收到内容时派发 talking 状态
+        if (!talkingDispatched) {
+          talkingDispatched = true
           window.dispatchEvent(new CustomEvent('pet-state-change', { detail: 'talking' }))
         }
       } else if (data.type === 'result') {
         if (data.result) {
-          // 最终结果覆盖（确保完整）
           updateStreamMessage(data.result)
           streamContent.value = data.result
         }
@@ -133,8 +132,8 @@ onMounted(() => {
   cleanups.push(
     window.petAPI.onClaudeDone(() => {
       isThinking.value = false
+      talkingDispatched = false
       window.dispatchEvent(new CustomEvent('pet-state-change', { detail: 'idle' }))
-      // 保存会话
       if (messages.value.length > 0) {
         window.petAPI?.saveSession(`session-${Date.now()}`, messages.value)
       }
@@ -145,6 +144,7 @@ onMounted(() => {
   cleanups.push(
     window.petAPI.onClaudeError((msg: string) => {
       isThinking.value = false
+      talkingDispatched = false
       window.dispatchEvent(new CustomEvent('pet-state-change', { detail: 'idle' }))
       messages.value.push({
         id: `err-${Date.now()}`,
@@ -169,10 +169,9 @@ function updateStreamMessage(content: string) {
   scrollToBottom()
 }
 
-// BUG-5 FIX: 停止时也要重置状态
 function onStop() {
   window.petAPI?.stopClaude()
-  window.dispatchEvent(new CustomEvent('pet-state-change', { detail: 'idle' }))
+  // cleanupClaude 会触发 onClaudeDone，不需要额外派发 idle
 }
 </script>
 
@@ -213,7 +212,6 @@ function onStop() {
         <div v-else class="msg-system">{{ msg.content }}</div>
       </div>
 
-      <!-- BUG-4 FIX: streamContent 现在是 ref，响应式正确 -->
       <div v-if="isThinking && !streamContent" class="thinking-dots">
         <span></span><span></span><span></span>
       </div>
