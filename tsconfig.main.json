@@ -10,8 +10,7 @@
     "rootDir": "src/main",
     "resolveJsonModule": true,
     "declaration": false,
-    "sourceMap": true,
-    "ignoreDeprecations": "6.0"
+    "sourceMap": true
   },
   "include": ["src/main/**/*.ts"]
 }
