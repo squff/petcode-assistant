@@ -139,7 +139,7 @@ onMounted(() => {
       talkingDispatched = false
       window.dispatchEvent(new CustomEvent('pet-state-change', { detail: 'idle' }))
       if (messages.value.length > 0) {
-        window.petAPI?.saveSession(`session-${Date.now()}`, messages.value)
+        window.petAPI?.saveSession(`session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, messages.value)
       }
       scrollToBottom()
     })
