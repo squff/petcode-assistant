@@ -159,13 +159,17 @@ watch(() => props.character, () => {
   width: 130px;
   height: 160px;
   cursor: grab;
-  contain: layout style paint;
-  will-change: transform;
   -webkit-app-region: drag;
 }
 .pet-wrapper:active { cursor: grabbing; }
 
-.character-body { position: relative; width: 100%; height: 100%; }
+.character-body {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  contain: layout style paint;
+  will-change: transform;
+}
 
 /* ===== 气泡 ===== */
 .bubble {

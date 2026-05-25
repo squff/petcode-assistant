@@ -38,6 +38,7 @@ function createWindow(): void {
     skipTaskbar: true,
     hasShadow: false,
     ...(isWin ? { backgroundColor: '#00000000' } : {}),
+    ...(isWin ? { thickFrame: true } : {}),
     webPreferences: {
       preload: path.join(__dirname, '..', 'preload', 'index.js'),
       contextIsolation: true,
