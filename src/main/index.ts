@@ -9,7 +9,6 @@ const isWin = process.platform === 'win32'
 const PET_WIDTH = 320
 const PET_HEIGHT = 420
 const SESSION_DIR = path.join(app.getPath('userData'), 'sessions')
-const WIN_ARG_LIMIT = 7500
 
 if (!fs.existsSync(SESSION_DIR)) {
   fs.mkdirSync(SESSION_DIR, { recursive: true })
@@ -193,18 +192,14 @@ function sendToClaude(message: string, files?: string[]): void {
 
   if (isWin) {
     // Windows: .cmd 需要 shell:true
-    if (fullMessage.length < WIN_ARG_LIMIT) {
-      spawnCmd = claudeBin
-      spawnArgs = ['-p', fullMessage, ...baseArgs]
-      spawnShell = true
-    } else {
-      // 长 prompt：写临时文件，用 PowerShell 读取内容传给 claude
-      promptFile = writePromptFile(fullMessage)
-      const psScript = `$content = Get-Content -Raw -Path '${promptFile}'; & '${claudeBin}' -p $content ${baseArgs.map(a => `'${a}'`).join(' ')}`
-      spawnCmd = 'powershell'
-      spawnArgs = ['-NoProfile', '-NonInteractive', '-Command', psScript]
-      spawnShell = false
-    }
+    // Windows 统一用 PowerShell + 临时文件，避免 shell:true 特殊字符问题
+    promptFile = writePromptFile(fullMessage)
+    // 用 PowerShell -EncodedCommand 传递 Base64 编码的命令，彻底避免转义问题
+    const psCommand = `$c = Get-Content -Raw -Path '${promptFile.replace(/'/g, "''")}'; & '${claudeBin.replace(/'/g, "''")}' -p $c ${baseArgs.map(a => `'${a.replace(/'/g, "''")}'`).join(' ')}`
+    const encodedCmd = Buffer.from(psCommand, 'utf16le').toString('base64')
+    spawnCmd = 'powershell'
+    spawnArgs = ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodedCmd]
+    spawnShell = false
   } else {
     // Linux/Mac: prompt 直接当参数（Linux ARG_MAX 通常 2MB，足够）
     spawnCmd = claudeBin

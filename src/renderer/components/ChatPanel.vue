@@ -61,7 +61,7 @@ function newSession() {
   currentStreamMsgId = ''
   talkingDispatched = false
   if (window.petAPI) {
-    (window.petAPI as any).newSession?.()
+    window.petAPI.newSession()
   }
 }
 
@@ -119,8 +119,12 @@ onMounted(() => {
         }
       } else if (data.type === 'result') {
         if (data.result) {
-          updateStreamMessage(data.result)
-          streamContent.value = data.result
+          // result 是最终完整内容，仅在没有流式内容时使用
+          // 避免覆盖已累积的流式文本（result 可能是截断版）
+          if (!streamContent.value) {
+            streamContent.value = data.result
+            updateStreamMessage(data.result)
+          }
         }
       } else if (data.type === 'raw') {
         streamContent.value += data.text

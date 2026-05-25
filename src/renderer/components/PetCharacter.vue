@@ -398,6 +398,11 @@ watch(() => props.character, () => {
 
 @keyframes yier-breathe { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-3px)} }
 @keyframes yier-think { 0%,100%{transform:translateY(0) rotate(0)} 25%{transform:translateY(-2px) rotate(-2deg)} 75%{transform:translateY(-2px) rotate(2deg)} }
+/* 一二 talking 嘴巴动画 */
+.yier.talking .mouth::before,
+.yier.talking .mouth::after {
+  animation: mouth-move 0.25s ease-in-out infinite alternate;
+}
 
 /* ==================== 布布：浅棕色小狗 ==================== */
 .bubu { animation: bubu-float 1.5s ease-in-out infinite; position: relative; }
