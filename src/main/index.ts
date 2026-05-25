@@ -198,7 +198,7 @@ function sendToClaude(message: string, files?: string[]): void {
     const psCommand = `$c = Get-Content -Raw -Path '${promptFile.replace(/'/g, "''")}'; & '${claudeBin.replace(/'/g, "''")}' -p $c ${baseArgs.map(a => `'${a.replace(/'/g, "''")}'`).join(' ')}`
     const encodedCmd = Buffer.from(psCommand, 'utf16le').toString('base64')
     spawnCmd = 'powershell'
-    spawnArgs = ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodedCmd]
+    spawnArgs = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encodedCmd]
     spawnShell = false
   } else {
     // Linux/Mac: prompt 直接当参数（Linux ARG_MAX 通常 2MB，足够）
