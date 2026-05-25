@@ -31,30 +31,21 @@
       {
         "from": "resources/",
         "to": "resources/",
-        "filter": [
-          "**/*"
-        ]
+        "filter": ["**/*"]
       }
     ],
     "linux": {
-      "target": [
-        "AppImage",
-        "deb"
-      ],
+      "target": ["AppImage", "deb"],
       "category": "Utility",
       "icon": "resources/icon.png"
     },
     "mac": {
-      "target": [
-        "dmg"
-      ],
+      "target": ["dmg"],
       "category": "public.app-category.utilities",
       "icon": "resources/icon.icns"
     },
     "win": {
-      "target": [
-        "nsis"
-      ],
+      "target": ["nsis"],
       "icon": "resources/icon.ico"
     },
     "nsis": {
