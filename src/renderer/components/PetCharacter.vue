@@ -40,43 +40,26 @@ function resetAlert() {
   }
 }
 
-// --- 拖拽窗口 ---
-let isDragging = false
-let lastX = 0
-let lastY = 0
-let moveDistance = 0
-const DRAG_THRESHOLD = 3
+// --- 双击打开对话 ---
+let clickTimer: ReturnType<typeof setTimeout> | null = null
+let clickCount = 0
 
-function onMouseDown(e: MouseEvent) {
-  isDragging = false
-  moveDistance = 0
-  lastX = e.screenX
-  lastY = e.screenY
+function onClick(e: MouseEvent) {
+  e.stopPropagation()
+  clickCount++
 
-  const onMove = (me: MouseEvent) => {
-    const dx = me.screenX - lastX
-    const dy = me.screenY - lastY
-    moveDistance += Math.abs(dx) + Math.abs(dy)
-    if (moveDistance > DRAG_THRESHOLD) {
-      isDragging = true
-    }
-    lastX = me.screenX
-    lastY = me.screenY
-    window.petAPI?.dragWindow(dx, dy)
+  if (clickCount === 1) {
+    clickTimer = setTimeout(() => {
+      // 单击 — 无操作（留给拖拽）
+      clickCount = 0
+    }, 250)
+  } else if (clickCount === 2) {
+    // 双击 — 打开对话
+    if (clickTimer) clearTimeout(clickTimer)
+    clickCount = 0
+    emit('click')
+    resetAlert()
   }
-
-  const onUp = () => {
-    window.removeEventListener('mousemove', onMove)
-    window.removeEventListener('mouseup', onUp)
-    if (!isDragging) {
-      emit('click')
-      resetAlert()
-    }
-    isDragging = false
-  }
-
-  window.addEventListener('mousemove', onMove)
-  window.addEventListener('mouseup', onUp)
 }
 
 onMounted(() => {
@@ -87,6 +70,7 @@ onMounted(() => {
 onUnmounted(() => {
   stopBlinking()
   if (alertTimer) clearTimeout(alertTimer)
+  if (clickTimer) clearTimeout(clickTimer)
 })
 
 watch(() => props.character, () => {
@@ -98,7 +82,7 @@ watch(() => props.character, () => {
   <div
     class="pet-wrapper"
     :class="[`pet-${character}`, `state-${state}`]"
-    @mousedown="onMouseDown"
+    @dblclick="(e: MouseEvent) => { emit('click'); resetAlert() }"
     @contextmenu="(e: MouseEvent) => emit('contextMenu', e)"
   >
     <!-- 气泡 -->
@@ -116,31 +100,22 @@ watch(() => props.character, () => {
       <!-- ========== 一二：黑白熊猫小熊 ========== -->
       <template v-if="character === 'yier'">
         <div class="yier" :class="{ blinking: isBlinking, thinking: state === 'thinking', talking: state === 'talking' }">
-          <!-- 耳朵 (黑色圆形) -->
           <div class="ear ear-l"></div>
           <div class="ear ear-r"></div>
-          <!-- 头 -->
           <div class="head">
-            <!-- 眼睛 -->
             <div class="eyes">
               <div class="eye" :class="{ closed: isBlinking }"><div class="highlight"></div></div>
               <div class="eye" :class="{ closed: isBlinking }"><div class="highlight"></div></div>
             </div>
-            <!-- 腮红 -->
             <div class="blush bl"></div>
             <div class="blush br"></div>
-            <!-- 嘴巴 (W形) -->
             <div class="mouth"></div>
           </div>
-          <!-- 身体 -->
           <div class="body">
-            <!-- 手臂 (黑色末端) -->
             <div class="arm arm-l"></div>
             <div class="arm arm-r"></div>
-            <!-- 肚子 -->
             <div class="belly"></div>
           </div>
-          <!-- 脚 (黑色) -->
           <div class="foot foot-l"></div>
           <div class="foot foot-r"></div>
         </div>
@@ -149,36 +124,25 @@ watch(() => props.character, () => {
       <!-- ========== 布布：浅棕色小狗 ========== -->
       <template v-if="character === 'bubu'">
         <div class="bubu" :class="{ blinking: isBlinking, thinking: state === 'thinking', happy: state === 'happy', talking: state === 'talking' }">
-          <!-- 耳朵 (下垂) -->
           <div class="ear ear-l"></div>
           <div class="ear ear-r"></div>
-          <!-- 头 -->
           <div class="head">
-            <!-- 眼睛 -->
             <div class="eyes">
               <div class="eye" :class="{ closed: isBlinking }"><div class="highlight"></div></div>
               <div class="eye" :class="{ closed: isBlinking }"><div class="highlight"></div></div>
             </div>
-            <!-- 腮红 -->
             <div class="blush bl"></div>
             <div class="blush br"></div>
-            <!-- 鼻子 -->
             <div class="nose"></div>
-            <!-- 嘴巴 (W形) -->
             <div class="mouth"></div>
           </div>
-          <!-- 身体 -->
           <div class="body">
-            <!-- 手臂 -->
             <div class="arm arm-l"></div>
             <div class="arm arm-r"></div>
-            <!-- 肚子 -->
             <div class="belly"></div>
           </div>
-          <!-- 脚 -->
           <div class="foot foot-l"></div>
           <div class="foot foot-r"></div>
-          <!-- 尾巴 -->
           <div class="tail"></div>
         </div>
       </template>
@@ -194,10 +158,12 @@ watch(() => props.character, () => {
   position: relative;
   width: 130px;
   height: 160px;
-  cursor: pointer;
-  transition: transform 0.15s var(--pet-transition);
+  cursor: grab;
+  contain: layout style paint;
+  will-change: transform;
+  -webkit-app-region: drag;
 }
-.pet-wrapper:active { transform: scale(0.96); }
+.pet-wrapper:active { cursor: grabbing; }
 
 .character-body { position: relative; width: 100%; height: 100%; }
 
@@ -214,6 +180,7 @@ watch(() => props.character, () => {
   white-space: nowrap;
   z-index: 10;
   box-shadow: 0 3px 10px rgba(0,0,0,0.08);
+  -webkit-app-region: no-drag;
 }
 .thinking-bubble { background: rgba(255,255,255,0.95); color: #6C5CE7; }
 .alert-bubble { background: rgba(255,255,255,0.95); color: #FD79A8; animation: float-gentle 2s ease-in-out infinite; }
@@ -248,13 +215,12 @@ watch(() => props.character, () => {
   border-radius: 50%;
 }
 .ground-shadow.bouncing { animation: shadow-pulse 1.5s ease-in-out infinite; }
-@keyframes shadow-pulse { 0%,100%{width:60px;opacity:0.8} 50%{width:44px;opacity:0.5} }
+@keyframes shadow-pulse { 0%,100%{transform:translateX(-50%) scaleX(1);opacity:0.8} 50%{transform:translateX(-50%) scaleX(0.7);opacity:0.5} }
 
 /* ==================== 一二：黑白熊猫小熊 ==================== */
 .yier { animation: yier-breathe 3s ease-in-out infinite; position: relative; }
 .yier.thinking { animation: yier-think 0.8s ease-in-out infinite; }
 
-/* 耳朵 */
 .yier .ear {
   position: absolute;
   width: 26px; height: 26px;
@@ -275,7 +241,6 @@ watch(() => props.character, () => {
   transform: translateX(-50%);
 }
 
-/* 头 */
 .yier .head {
   position: absolute;
   width: 80px; height: 72px;
@@ -288,7 +253,6 @@ watch(() => props.character, () => {
   box-shadow: inset 0 -3px 6px rgba(0,0,0,0.04);
 }
 
-/* 眼睛 */
 .yier .eyes {
   display: flex;
   justify-content: center;
@@ -311,7 +275,6 @@ watch(() => props.character, () => {
   top: 2px; left: 2px;
 }
 
-/* 腮红 */
 .yier .blush {
   position: absolute;
   width: 14px; height: 8px;
@@ -322,7 +285,6 @@ watch(() => props.character, () => {
 .yier .bl { left: 6px; }
 .yier .br { right: 6px; }
 
-/* 嘴巴 (W形) */
 .yier .mouth {
   position: absolute;
   bottom: 16px;
@@ -340,7 +302,6 @@ watch(() => props.character, () => {
 .yier .mouth::before { left: 0; }
 .yier .mouth::after { right: 0; }
 
-/* 身体 */
 .yier .body {
   position: absolute;
   width: 60px; height: 40px;
@@ -352,7 +313,6 @@ watch(() => props.character, () => {
   z-index: 1;
 }
 
-/* 肚子 */
 .yier .belly {
   position: absolute;
   width: 36px; height: 24px;
@@ -364,7 +324,6 @@ watch(() => props.character, () => {
   z-index: 2;
 }
 
-/* 手臂 */
 .yier .arm {
   position: absolute;
   width: 16px; height: 28px;
@@ -384,7 +343,6 @@ watch(() => props.character, () => {
 .yier .arm-l { left: 8px; transform: rotate(8deg); }
 .yier .arm-r { right: 8px; transform: rotate(-8deg); }
 
-/* 脚 */
 .yier .foot {
   position: absolute;
   width: 22px; height: 14px;
@@ -398,7 +356,6 @@ watch(() => props.character, () => {
 
 @keyframes yier-breathe { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-3px)} }
 @keyframes yier-think { 0%,100%{transform:translateY(0) rotate(0)} 25%{transform:translateY(-2px) rotate(-2deg)} 75%{transform:translateY(-2px) rotate(2deg)} }
-/* 一二 talking 嘴巴动画 */
 .yier.talking .mouth::before,
 .yier.talking .mouth::after {
   animation: mouth-move 0.25s ease-in-out infinite alternate;
@@ -410,7 +367,6 @@ watch(() => props.character, () => {
 .bubu.happy { animation: bubu-spin 0.7s ease-in-out; }
 .bubu.talking .mouth::before { animation: mouth-move 0.2s ease-in-out infinite alternate; }
 
-/* 耳朵 (下垂) */
 .bubu .ear {
   position: absolute;
   width: 22px; height: 32px;
@@ -432,7 +388,6 @@ watch(() => props.character, () => {
   transform: translateX(-50%);
 }
 
-/* 头 */
 .bubu .head {
   position: absolute;
   width: 84px; height: 76px;
@@ -445,7 +400,6 @@ watch(() => props.character, () => {
   box-shadow: inset 0 -4px 8px rgba(180,140,80,0.1);
 }
 
-/* 眼睛 */
 .bubu .eyes {
   display: flex;
   justify-content: center;
@@ -468,7 +422,6 @@ watch(() => props.character, () => {
   top: 2px; left: 2px;
 }
 
-/* 腮红 */
 .bubu .blush {
   position: absolute;
   width: 14px; height: 8px;
@@ -479,7 +432,6 @@ watch(() => props.character, () => {
 .bubu .bl { left: 6px; }
 .bubu .br { right: 6px; }
 
-/* 鼻子 */
 .bubu .nose {
   position: absolute;
   width: 10px; height: 7px;
@@ -490,7 +442,6 @@ watch(() => props.character, () => {
   transform: translateX(-50%);
 }
 
-/* 嘴巴 (W形) */
 .bubu .mouth {
   position: absolute;
   bottom: 14px;
@@ -508,7 +459,6 @@ watch(() => props.character, () => {
 .bubu .mouth::before { left: 0; }
 .bubu .mouth::after { right: 0; }
 
-/* 身体 */
 .bubu .body {
   position: absolute;
   width: 62px; height: 42px;
@@ -520,7 +470,6 @@ watch(() => props.character, () => {
   z-index: 1;
 }
 
-/* 肚子 */
 .bubu .belly {
   position: absolute;
   width: 38px; height: 26px;
@@ -532,7 +481,6 @@ watch(() => props.character, () => {
   z-index: 2;
 }
 
-/* 手臂 */
 .bubu .arm {
   position: absolute;
   width: 16px; height: 26px;
@@ -544,7 +492,6 @@ watch(() => props.character, () => {
 .bubu .arm-l { left: 8px; transform: rotate(10deg); animation: wave-l 2s ease-in-out infinite; }
 .bubu .arm-r { right: 8px; transform: rotate(-10deg); animation: wave-r 2s ease-in-out infinite; }
 
-/* 脚 */
 .bubu .foot {
   position: absolute;
   width: 22px; height: 14px;
@@ -556,7 +503,6 @@ watch(() => props.character, () => {
 .bubu .foot-l { left: 30px; }
 .bubu .foot-r { right: 30px; }
 
-/* 尾巴 */
 .bubu .tail {
   position: absolute;
   width: 16px; height: 20px;
@@ -565,7 +511,8 @@ watch(() => props.character, () => {
   top: 100px;
   right: 14px;
   z-index: 0;
-  animation: tail-wag 0.8s ease-in-out infinite alternate;
+  animation: tail-wag 1.2s ease-in-out infinite alternate;
+  will-change: transform;
   transform-origin: bottom center;
 }
 

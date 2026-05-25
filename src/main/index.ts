@@ -398,3 +398,11 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit() })
 app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow() })
 app.on('before-quit', () => { if (claudeProcess) { claudeProcess.kill(); claudeProcess = null } })
+
+// 未捕获异常处理 — 防止进程静默崩溃
+process.on('uncaughtException', (err) => {
+  console.error('[FATAL] Uncaught exception:', err)
+})
+process.on('unhandledRejection', (reason) => {
+  console.error('[FATAL] Unhandled rejection:', reason)
+})
