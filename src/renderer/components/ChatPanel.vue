@@ -251,7 +251,7 @@ function onStop() {
   box-shadow: var(--pet-shadow);
   overflow: hidden;
   position: absolute;
-  bottom: 165px;
+  bottom: 200px;
   left: 50%;
   transform: translateX(-50%);
 }

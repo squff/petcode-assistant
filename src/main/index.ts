@@ -6,8 +6,8 @@ import os from 'os'
 
 // ============ Constants ============
 const isWin = process.platform === 'win32'
-const PET_WIDTH = 320
-const PET_HEIGHT = 420
+const PET_WIDTH = 360
+const PET_HEIGHT = 460
 const SESSION_DIR = path.join(app.getPath('userData'), 'sessions')
 
 if (!fs.existsSync(SESSION_DIR)) {
